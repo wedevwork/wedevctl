@@ -19,6 +19,13 @@ profile.cov
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+target/
+build/
+wedevctl
+design/
+design
+.github/copilot-instructions.md
+/design
 
 # Go workspace file
 go.work
@@ -29,4 +36,4 @@ go.work.sum
 
 # Editor/IDE
 # .idea/
-# .vscode/
+.vscode/
