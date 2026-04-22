@@ -447,21 +447,21 @@ func (wcg *WireGuardConfigGenerator) generateServerConfig(_ *VirtualNetwork, ser
 	var config strings.Builder
 
 	config.WriteString("[Interface]\n")
-	config.WriteString(fmt.Sprintf("PrivateKey = %s\n", server.PrivateKey))
-	config.WriteString(fmt.Sprintf("Address = %s/32\n", server.VirtualIP))
-	config.WriteString(fmt.Sprintf("ListenPort = %d\n", server.Port))
+	fmt.Fprintf(&config, "PrivateKey = %s\n", server.PrivateKey)
+	fmt.Fprintf(&config, "Address = %s/32\n", server.VirtualIP)
+	fmt.Fprintf(&config, "ListenPort = %d\n", server.Port)
 	config.WriteString("PostUp = sysctl -w net.ipv4.ip_forward=1\n")
 	config.WriteString("PostDown = sysctl -w net.ipv4.ip_forward=0\n")
 
 	// Add peer for each node
 	for _, node := range nodes {
 		config.WriteString("\n[Peer]\n")
-		config.WriteString(fmt.Sprintf("PublicKey = %s\n", node.PublicKey))
-		config.WriteString(fmt.Sprintf("AllowedIPs = %s/32\n", node.VirtualIP))
+		fmt.Fprintf(&config, "PublicKey = %s\n", node.PublicKey)
+		fmt.Fprintf(&config, "AllowedIPs = %s/32\n", node.VirtualIP)
 		// Only add Endpoint for peer type nodes (route nodes connect to server, not vice versa)
 		if node.Type == NodeTypePeer && node.PublicAddress != "" {
 			endpoint := util.FormatEndpoint(node.PublicAddress, node.Port)
-			config.WriteString(fmt.Sprintf("Endpoint = %s\n", endpoint))
+			fmt.Fprintf(&config, "Endpoint = %s\n", endpoint)
 		}
 	}
 
@@ -473,17 +473,17 @@ func (wcg *WireGuardConfigGenerator) generateNodeConfig(network *VirtualNetwork,
 	var config strings.Builder
 
 	config.WriteString("[Interface]\n")
-	config.WriteString(fmt.Sprintf("PrivateKey = %s\n", node.PrivateKey))
-	config.WriteString(fmt.Sprintf("Address = %s/32\n", node.VirtualIP))
-	config.WriteString(fmt.Sprintf("ListenPort = %d\n", node.Port))
+	fmt.Fprintf(&config, "PrivateKey = %s\n", node.PrivateKey)
+	fmt.Fprintf(&config, "Address = %s/32\n", node.VirtualIP)
+	fmt.Fprintf(&config, "ListenPort = %d\n", node.Port)
 
 	// Add server peer
 	config.WriteString("\n[Peer]\n")
-	config.WriteString(fmt.Sprintf("PublicKey = %s\n", server.PublicKey))
-	config.WriteString(fmt.Sprintf("AllowedIPs = %s\n", network.CIDR))
+	fmt.Fprintf(&config, "PublicKey = %s\n", server.PublicKey)
+	fmt.Fprintf(&config, "AllowedIPs = %s\n", network.CIDR)
 	if server.PublicAddress != "" {
 		endpoint := util.FormatEndpoint(server.PublicAddress, server.Port)
-		config.WriteString(fmt.Sprintf("Endpoint = %s\n", endpoint))
+		fmt.Fprintf(&config, "Endpoint = %s\n", endpoint)
 	}
 
 	// For peer type nodes, add peer connections to other peer nodes
@@ -491,11 +491,11 @@ func (wcg *WireGuardConfigGenerator) generateNodeConfig(network *VirtualNetwork,
 		for _, otherNode := range allNodes {
 			if otherNode.ID != node.ID && otherNode.Type == NodeTypePeer {
 				config.WriteString("\n[Peer]\n")
-				config.WriteString(fmt.Sprintf("PublicKey = %s\n", otherNode.PublicKey))
-				config.WriteString(fmt.Sprintf("AllowedIPs = %s/32\n", otherNode.VirtualIP))
+				fmt.Fprintf(&config, "PublicKey = %s\n", otherNode.PublicKey)
+				fmt.Fprintf(&config, "AllowedIPs = %s/32\n", otherNode.VirtualIP)
 				if otherNode.PublicAddress != "" {
 					endpoint := util.FormatEndpoint(otherNode.PublicAddress, otherNode.Port)
-					config.WriteString(fmt.Sprintf("Endpoint = %s\n", endpoint))
+					fmt.Fprintf(&config, "Endpoint = %s\n", endpoint)
 				}
 			}
 		}
@@ -508,11 +508,11 @@ func (wcg *WireGuardConfigGenerator) generateNodeConfig(network *VirtualNetwork,
 		for _, otherNode := range allNodes {
 			if otherNode.Type == NodeTypePeer {
 				config.WriteString("\n[Peer]\n")
-				config.WriteString(fmt.Sprintf("PublicKey = %s\n", otherNode.PublicKey))
-				config.WriteString(fmt.Sprintf("AllowedIPs = %s/32\n", otherNode.VirtualIP))
+				fmt.Fprintf(&config, "PublicKey = %s\n", otherNode.PublicKey)
+				fmt.Fprintf(&config, "AllowedIPs = %s/32\n", otherNode.VirtualIP)
 				if otherNode.PublicAddress != "" {
 					endpoint := util.FormatEndpoint(otherNode.PublicAddress, otherNode.Port)
-					config.WriteString(fmt.Sprintf("Endpoint = %s\n", endpoint))
+					fmt.Fprintf(&config, "Endpoint = %s\n", endpoint)
 				}
 			}
 		}
