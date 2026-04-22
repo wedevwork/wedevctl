@@ -117,7 +117,9 @@ func NewStorageManager(dbPath string) (*StorageManager, error) {
 		}
 		return nil
 	}); err != nil {
-		db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			return nil, fmt.Errorf("failed to close database after init error: %w", closeErr)
+		}
 		return nil, err
 	}
 
