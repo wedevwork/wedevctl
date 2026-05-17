@@ -2,6 +2,7 @@
 package util
 
 import (
+	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -315,31 +316,34 @@ type WireGuardKeyPair struct {
 	PublicKey  string
 }
 
-// GenerateWireGuardKeys generates a WireGuard key pair
+// GenerateWireGuardKeys generates a WireGuard X25519 (Curve25519) key pair.
+//
+// The private key is 32 cryptographically secure random bytes, clamped per
+// RFC 7748 §5 (the same clamping `wg genkey` applies). The public key is the
+// Curve25519 point derived from the private key, so the two keys are a real,
+// mathematically linked key pair usable by WireGuard — not independent random
+// values.
 func GenerateWireGuardKeys() (*WireGuardKeyPair, error) {
-	// Generate 32 random bytes for private key
+	// Generate 32 cryptographically secure random bytes for the private key.
 	privateKeyBytes := make([]byte, 32)
-	_, err := rand.Read(privateKeyBytes)
-	if err != nil {
+	if _, err := rand.Read(privateKeyBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	// Encode to base64
-	privateKey := base64.StdEncoding.EncodeToString(privateKeyBytes)
+	// Clamp the scalar per RFC 7748 §5, matching `wg genkey`.
+	privateKeyBytes[0] &= 248
+	privateKeyBytes[31] &= 127
+	privateKeyBytes[31] |= 64
 
-	// For public key, we'll use a simple hash-based approach
-	// In real WireGuard, public key is derived from private using Curve25519
-	// For this mock, we generate a different random key
-	publicKeyBytes := make([]byte, 32)
-	_, err = rand.Read(publicKeyBytes)
+	// Derive the public key as the X25519 point of the private key.
+	priv, err := ecdh.X25519().NewPrivateKey(privateKeyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate public key: %w", err)
+		return nil, fmt.Errorf("failed to construct private key: %w", err)
 	}
-	publicKey := base64.StdEncoding.EncodeToString(publicKeyBytes)
 
 	return &WireGuardKeyPair{
-		PrivateKey: privateKey,
-		PublicKey:  publicKey,
+		PrivateKey: base64.StdEncoding.EncodeToString(priv.Bytes()),
+		PublicKey:  base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes()),
 	}, nil
 }
 

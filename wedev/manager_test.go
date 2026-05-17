@@ -1,6 +1,7 @@
 package wedev
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -426,6 +427,16 @@ func TestGenerateServerConfig(t *testing.T) {
 	if !strings.Contains(serverConfig, node2.PublicKey) {
 		t.Errorf("Server config missing peer for node2")
 	}
+
+	// The server is the keepalive target, not a sender; no keepalive expected.
+	if strings.Contains(serverConfig, "PersistentKeepalive") {
+		t.Errorf("Server config should not contain PersistentKeepalive")
+	}
+
+	// Config file must end with a trailing blank line.
+	if !strings.HasSuffix(serverConfig, "\n\n") {
+		t.Errorf("Server config missing trailing blank line")
+	}
 }
 
 func TestGeneratePeerNodeConfig(t *testing.T) {
@@ -485,6 +496,16 @@ func TestGeneratePeerNodeConfig(t *testing.T) {
 	if !strings.Contains(node1Config, "192.168.1.1:51820") {
 		t.Errorf("Peer node config missing correct server endpoint")
 	}
+
+	// Peer nodes are not behind NAT for tunnel purposes; no keepalive expected.
+	if strings.Contains(node1Config, "PersistentKeepalive") {
+		t.Errorf("Peer node config should not contain PersistentKeepalive")
+	}
+
+	// Config file must end with a trailing blank line.
+	if !strings.HasSuffix(node1Config, "\n\n") {
+		t.Errorf("Peer node config missing trailing blank line")
+	}
 }
 
 func TestGenerateRouteNodeConfig(t *testing.T) {
@@ -543,6 +564,111 @@ func TestGenerateRouteNodeConfig(t *testing.T) {
 	// Route node should have peer endpoint
 	if !strings.Contains(routeNodeConfig, "192.168.1.3:51822") {
 		t.Errorf("Route node config missing peer node endpoint")
+	}
+
+	// Route node connects outbound only, so every peer must carry a keepalive.
+	// There are two [Peer] blocks (server + node2); both need PersistentKeepalive.
+	if got := strings.Count(routeNodeConfig, "PersistentKeepalive = 25"); got != 2 {
+		t.Errorf("Route node config PersistentKeepalive count = %d, want 2", got)
+	}
+
+	// Config file must end with a trailing blank line.
+	if !strings.HasSuffix(routeNodeConfig, "\n\n") {
+		t.Errorf("Route node config missing trailing blank line")
+	}
+}
+
+func TestConfigPeerOrderingByVirtualIP(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	storage, err := NewStorageManager(dbPath)
+	if err != nil {
+		t.Fatalf("NewStorageManager() error = %v", err)
+	}
+	defer func() {
+		if err := storage.Close(); err != nil {
+			t.Errorf("storage.Close() error = %v", err)
+		}
+	}()
+
+	validator := util.NewDefaultIPValidator()
+	vnm, err := NewVirtualNetworkManager(storage, validator)
+	if err != nil {
+		t.Fatalf("NewVirtualNetworkManager() error = %v", err)
+	}
+
+	if _, err := vnm.CreateVirtualNetwork("testnet", "10.0.0.0/24"); err != nil {
+		t.Fatalf("CreateVirtualNetwork() error = %v", err)
+	}
+	if _, err := vnm.CreateServer("testnet", "s1", "s1.pub", 51820); err != nil {
+		t.Fatalf("CreateServer() error = %v", err)
+	}
+	for i := 1; i <= 5; i++ {
+		name := fmt.Sprintf("n%d", i)
+		if _, err := vnm.CreateNode("testnet", name, name+".pub", 51820+i, NodeTypePeer); err != nil {
+			t.Fatalf("CreateNode(%s) error = %v", name, err)
+		}
+	}
+
+	generator := NewWireGuardConfigGenerator(storage)
+	configs, _, err := generator.GenerateConfigs("testnet", storage)
+	if err != nil {
+		t.Fatalf("GenerateConfigs() error = %v", err)
+	}
+
+	// Peer blocks in the server config must be ordered by ascending virtual IP,
+	// independent of storage (UUID-keyed) iteration order.
+	want := []string{
+		"AllowedIPs = 10.0.0.2/32",
+		"AllowedIPs = 10.0.0.3/32",
+		"AllowedIPs = 10.0.0.4/32",
+		"AllowedIPs = 10.0.0.5/32",
+		"AllowedIPs = 10.0.0.6/32",
+	}
+	serverConfig := configs["s1"]
+	prev := -1
+	for _, line := range want {
+		idx := strings.Index(serverConfig, line)
+		if idx < 0 {
+			t.Fatalf("server config missing %q", line)
+		}
+		if idx < prev {
+			t.Errorf("server config peers not sorted by virtual IP: %q out of order", line)
+		}
+		prev = idx
+	}
+
+	// The sort feeds every node config too, not just the server config:
+	// n1's peer blocks (the other four peers) must also be IP-ordered.
+	nodeWant := []string{
+		"AllowedIPs = 10.0.0.3/32",
+		"AllowedIPs = 10.0.0.4/32",
+		"AllowedIPs = 10.0.0.5/32",
+		"AllowedIPs = 10.0.0.6/32",
+	}
+	n1Config := configs["n1"]
+	prev = -1
+	for _, line := range nodeWant {
+		idx := strings.Index(n1Config, line)
+		if idx < 0 {
+			t.Fatalf("n1 config missing %q", line)
+		}
+		if idx < prev {
+			t.Errorf("n1 config peers not sorted by virtual IP: %q out of order", line)
+		}
+		prev = idx
+	}
+
+	// Output must be deterministic: regenerating yields the identical content.
+	configs2, _, err := generator.GenerateConfigs("testnet", storage)
+	if err != nil {
+		t.Fatalf("GenerateConfigs() second call error = %v", err)
+	}
+	if configs2["s1"] != serverConfig {
+		t.Errorf("server config not reproducible across GenerateConfigs() calls")
+	}
+	if configs2["n1"] != n1Config {
+		t.Errorf("n1 config not reproducible across GenerateConfigs() calls")
 	}
 }
 

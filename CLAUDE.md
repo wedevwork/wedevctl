@@ -167,9 +167,18 @@ or test** (enforced by the Stop hook):
 
 `.claude/settings.json` registers a **Stop hook** (`.claude/hooks/verify-changes.sh`)
 that runs when a turn finishes. If the turn changed Go code it blocks completion
-until `go test -race ./...` passes, every package holds ≥80% coverage, and — when
-a hot-path file changed — a test/benchmark file was also updated and the
-benchmarks run clean. It is local-only (no CI). Review or disable it via `/hooks`.
+until:
+
+- `go test -race ./...` passes and every package holds ≥80% coverage;
+- `gofmt -s -l .`, `go vet ./...`, `go build ./...`, and `golangci-lint run`
+  are all clean (this mirrors the CI static-analysis + build gate, so lint
+  and format failures surface locally instead of only in GitHub Actions);
+- when a hot-path file changed, a test/benchmark file was also updated and the
+  benchmarks run clean.
+
+The hook is local-only (it is not the CI itself). If `golangci-lint` is not
+installed it warns and skips that gate rather than blocking — CI still enforces
+it. Review or disable the hook via `/hooks`.
 
 ## Testing Requirements
 
@@ -198,6 +207,7 @@ If tests fail, fix the code first. Only adjust tests if the test itself is wrong
 ```bash
 gofmt -s -l .         # No formatting diffs — CI fails if this lists any file
 go vet ./...          # No vet errors
+golangci-lint run     # Lint + security gate — go vet does NOT cover this
 go test -race ./...   # All tests pass with race detector
 go build ./...        # All packages compile cleanly
 go build -o wedevctl main.go   # Produces the runnable binary (CI also runs `./wedevctl --help`)
@@ -207,9 +217,14 @@ govulncheck ./...     # No known CVEs in dependencies or the Go toolchain
 `go build ./...` is the broader gate — it compiles every package; `go build -o wedevctl
 main.go` only builds what `main` imports but emits the actual binary. CI runs both.
 
-Install `govulncheck` once with `go install golang.org/x/vuln/cmd/govulncheck@latest`.
+`golangci-lint run` is **not optional and not redundant with `go vet`** — its
+`errcheck`, `gocritic`, `gosec` (and other) linters catch a large class of issues
+`go vet` ignores. The Stop hook runs it automatically; run it by hand too.
+Install once with `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`,
+and `govulncheck` with `go install golang.org/x/vuln/cmd/govulncheck@latest`.
 
-The GitHub Actions pipeline (`.github/workflows/pr-checks.yml`) also runs:
+The GitHub Actions pipeline (`.github/workflows/pr-checks.yml`) runs the same
+checks, plus:
 
 - **golangci-lint** (pinned `v2.11.4`, config in `.golangci.yml`) — the blocking
   lint + security gate. `gosec` runs *inside* golangci-lint, so code-level security

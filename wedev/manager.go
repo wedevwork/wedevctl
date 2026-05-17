@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"os"
 	"sort"
 	"strings"
@@ -390,6 +391,11 @@ func (vnm *VirtualNetworkManager) DeleteNode(networkName, nodeName string) error
 
 // ========== WireGuard Configuration Generation ==========
 
+// persistentKeepalive is the PersistentKeepalive interval (seconds) added to
+// every peer in a route node's config. Route nodes connect outbound only
+// (typically behind NAT), so a keepalive is needed to hold the tunnel open.
+const persistentKeepalive = 25
+
 // WireGuardConfigGenerator generates WireGuard configurations
 type WireGuardConfigGenerator struct {
 	storage *StorageManager
@@ -419,6 +425,18 @@ func (wcg *WireGuardConfigGenerator) GenerateConfigs(networkName string, storage
 	if nErr != nil {
 		return nil, "", nErr
 	}
+
+	// Sort nodes by virtual IP so peer blocks are emitted in a stable,
+	// reproducible order regardless of storage iteration order (UUID-keyed).
+	sort.Slice(nodes, func(i, j int) bool {
+		a, errA := netip.ParseAddr(nodes[i].VirtualIP)
+		b, errB := netip.ParseAddr(nodes[j].VirtualIP)
+		if errA != nil || errB != nil {
+			// Fall back to string order if a virtual IP is unparseable.
+			return nodes[i].VirtualIP < nodes[j].VirtualIP
+		}
+		return a.Less(b)
+	})
 
 	// Generate server config
 	serverConfig := wcg.generateServerConfig(network, server, nodes)
@@ -465,6 +483,9 @@ func (wcg *WireGuardConfigGenerator) generateServerConfig(_ *VirtualNetwork, ser
 		}
 	}
 
+	// Trailing blank line at end of file.
+	config.WriteString("\n")
+
 	return config.String()
 }
 
@@ -484,6 +505,10 @@ func (wcg *WireGuardConfigGenerator) generateNodeConfig(network *VirtualNetwork,
 	if server.PublicAddress != "" {
 		endpoint := util.FormatEndpoint(server.PublicAddress, server.Port)
 		fmt.Fprintf(&config, "Endpoint = %s\n", endpoint)
+	}
+	// Route nodes connect outbound only; keep the tunnel to the server alive.
+	if node.Type == NodeTypeRoute {
+		fmt.Fprintf(&config, "PersistentKeepalive = %d\n", persistentKeepalive)
 	}
 
 	// For peer type nodes, add peer connections to other peer nodes
@@ -506,17 +531,23 @@ func (wcg *WireGuardConfigGenerator) generateNodeConfig(network *VirtualNetwork,
 	// Route-to-route communication still goes through the server
 	if node.Type == NodeTypeRoute {
 		for _, otherNode := range allNodes {
-			if otherNode.Type == NodeTypePeer {
-				config.WriteString("\n[Peer]\n")
-				fmt.Fprintf(&config, "PublicKey = %s\n", otherNode.PublicKey)
-				fmt.Fprintf(&config, "AllowedIPs = %s/32\n", otherNode.VirtualIP)
-				if otherNode.PublicAddress != "" {
-					endpoint := util.FormatEndpoint(otherNode.PublicAddress, otherNode.Port)
-					fmt.Fprintf(&config, "Endpoint = %s\n", endpoint)
-				}
+			if otherNode.Type != NodeTypePeer {
+				continue
 			}
+			config.WriteString("\n[Peer]\n")
+			fmt.Fprintf(&config, "PublicKey = %s\n", otherNode.PublicKey)
+			fmt.Fprintf(&config, "AllowedIPs = %s/32\n", otherNode.VirtualIP)
+			if otherNode.PublicAddress != "" {
+				endpoint := util.FormatEndpoint(otherNode.PublicAddress, otherNode.Port)
+				fmt.Fprintf(&config, "Endpoint = %s\n", endpoint)
+			}
+			// Route node behind NAT: keep the tunnel to this peer alive.
+			fmt.Fprintf(&config, "PersistentKeepalive = %d\n", persistentKeepalive)
 		}
 	}
+
+	// Trailing blank line at end of file.
+	config.WriteString("\n")
 
 	return config.String()
 }
