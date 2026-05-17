@@ -1,0 +1,109 @@
+name: Release
+
+# Manually triggered release workflow.
+#
+# Run it from the GitHub UI: Actions > Release > Run workflow, then enter the
+# version tag. It re-runs the test suite, cross-compiles the binaries, and
+# publishes a GitHub Release with the binaries and their SHA-256 checksums.
+#
+# Version format: vMAJOR.MINOR  (e.g. v0.01)
+#   - MAJOR — large release changes
+#   - MINOR — medium changes (features) and minor changes (fixes, CVEs)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (format vMAJOR.MINOR, e.g. v0.01)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark this release as a pre-release'
+        required: false
+        type: boolean
+        default: false
+
+# Allow the workflow to create tags and releases.
+permissions:
+  contents: write
+
+# Never run two releases at the same time.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history so release notes and the tag-exists check work.
+          fetch-depth: 0
+
+      - name: Validate version and check the tag is new
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$VERSION' is invalid. Expected format vMAJOR.MINOR (e.g. v0.01)."
+            exit 1
+          fi
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag '$VERSION' already exists. Pick a new version."
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Releasing $VERSION"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.10'
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      # Re-run the test suite as a release gate. main is already gated by
+      # pr-checks.yml, but this guarantees the exact commit being released
+      # is green before any binary is published.
+      - name: Run tests
+        run: go test -race ./...
+
+      - name: Build release binaries
+        run: |
+          mkdir -p dist
+          PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
+          for platform in $PLATFORMS; do
+            GOOS="${platform%/*}"
+            GOARCH="${platform#*/}"
+            output="wedevctl_${VERSION}_${GOOS}_${GOARCH}"
+            [ "$GOOS" = "windows" ] && output="${output}.exe"
+            echo "Building dist/${output}"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -trimpath -ldflags="-s -w" -o "dist/${output}" main.go
+          done
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          echo "Artifacts:"
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          # gh creates the tag "$VERSION" at the checked-out commit.
+          gh release create "$VERSION" \
+            --target "${{ github.sha }}" \
+            --title "$VERSION" \
+            --generate-notes \
+            $PRERELEASE_FLAG \
+            dist/*

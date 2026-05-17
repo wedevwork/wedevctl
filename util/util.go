@@ -347,15 +347,20 @@ func GenerateWireGuardKeys() (*WireGuardKeyPair, error) {
 	}, nil
 }
 
+// ValidatePort checks that a port number is within the valid TCP/UDP range.
+func ValidatePort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535, got %d", port)
+	}
+	return nil
+}
+
 // ValidateEndpoint validates endpoint format: address:port
 func ValidateEndpoint(address string, port int) error {
 	if address == "" {
 		return fmt.Errorf("endpoint address cannot be empty")
 	}
-	if port < 1 || port > 65535 {
-		return fmt.Errorf("port must be between 1 and 65535, got %d", port)
-	}
-	return nil
+	return ValidatePort(port)
 }
 
 // FormatEndpoint formats endpoint as address:port

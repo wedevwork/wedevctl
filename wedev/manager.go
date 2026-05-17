@@ -155,9 +155,35 @@ func (vnm *VirtualNetworkManager) CreateServer(networkName, serverName, publicAd
 		return nil, err
 	}
 
-	// Validate input
+	// Validate the server name (alphanumeric, letter-first) — names become
+	// config file names, so this also prevents path-traversal characters.
+	if valErr := vnm.validator.IsValidNetworkName(serverName); valErr != nil {
+		return nil, valErr
+	}
+
+	// Validate public address
 	if valErr := vnm.validator.IsValidPublicAddress(publicAddress); valErr != nil {
 		return nil, valErr
+	}
+
+	// Set default port if not specified, then validate the range.
+	if port == 0 {
+		port = 51820
+	}
+	if valErr := util.ValidatePort(port); valErr != nil {
+		return nil, valErr
+	}
+
+	// A node and the server cannot share a name: configs are keyed by name,
+	// so a collision would silently drop one config file.
+	nodes, err := vnm.storage.ListNodesByNetworkID(network.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range nodes {
+		if n.Name == serverName {
+			return nil, fmt.Errorf("name %q is already used by a node in this network", serverName)
+		}
 	}
 
 	// Ensure IP pool exists and is properly initialized
@@ -172,11 +198,6 @@ func (vnm *VirtualNetworkManager) CreateServer(networkName, serverName, publicAd
 	keys, err := util.GenerateWireGuardKeys()
 	if err != nil {
 		return nil, err
-	}
-
-	// Set default port if not specified
-	if port == 0 {
-		port = 51820
 	}
 
 	// Create server in storage
@@ -221,6 +242,11 @@ func (vnm *VirtualNetworkManager) UpdateServer(networkName, publicAddress string
 		return nil, valErr
 	}
 
+	// Validate the port range
+	if valErr := util.ValidatePort(port); valErr != nil {
+		return nil, valErr
+	}
+
 	// Update in storage
 	if updateErr := vnm.storage.UpdateServer(server.ID, publicAddress, port); updateErr != nil {
 		return nil, updateErr
@@ -248,6 +274,17 @@ func (vnm *VirtualNetworkManager) CreateNode(networkName, nodeName, publicAddres
 		return nil, err
 	}
 
+	// Validate the node name (alphanumeric, letter-first) — names become
+	// config file names, so this also prevents path-traversal characters.
+	if valErr := vnm.validator.IsValidNetworkName(nodeName); valErr != nil {
+		return nil, valErr
+	}
+
+	// Default type is peer; resolve it before the type-dependent checks below.
+	if nodeType == "" {
+		nodeType = NodeTypePeer
+	}
+
 	// Validate input: peer type requires public address, route type is optional
 	if nodeType == NodeTypePeer && publicAddress == "" {
 		return nil, fmt.Errorf("peer type nodes require a public address")
@@ -256,6 +293,19 @@ func (vnm *VirtualNetworkManager) CreateNode(networkName, nodeName, publicAddres
 		if valErr := vnm.validator.IsValidPublicAddress(publicAddress); valErr != nil {
 			return nil, valErr
 		}
+	}
+
+	// Set default port if not specified, then validate the range.
+	if port == 0 {
+		port = 51820
+	}
+	if valErr := util.ValidatePort(port); valErr != nil {
+		return nil, valErr
+	}
+
+	// A node and the server cannot share a name (configs are keyed by name).
+	if server, sErr := vnm.storage.GetServerByNetworkID(network.ID); sErr == nil && server.Name == nodeName {
+		return nil, fmt.Errorf("name %q is already used by the server in this network", nodeName)
 	}
 
 	// Ensure IP pool exists and is properly initialized
@@ -276,16 +326,6 @@ func (vnm *VirtualNetworkManager) CreateNode(networkName, nodeName, publicAddres
 		//nolint:errcheck // Acceptable to ignore in error cleanup path
 		_ = vnm.ipPools[network.ID].ReleaseNodeIP(nodeIP)
 		return nil, err
-	}
-
-	// Set default port if not specified
-	if port == 0 {
-		port = 51820
-	}
-
-	// Default type is peer
-	if nodeType == "" {
-		nodeType = NodeTypePeer
 	}
 
 	// Create node in storage
@@ -347,6 +387,11 @@ func (vnm *VirtualNetworkManager) UpdateNode(networkName, nodeName, publicAddres
 		}
 	}
 
+	// Validate the port range
+	if valErr := util.ValidatePort(port); valErr != nil {
+		return nil, valErr
+	}
+
 	// Update in storage
 	if err := vnm.storage.UpdateNode(node.ID, publicAddress, port, nodeType); err != nil {
 		return nil, err
@@ -374,7 +419,14 @@ func (vnm *VirtualNetworkManager) DeleteNode(networkName, nodeName string) error
 		return fmt.Errorf("failed to ensure IP pool: %w", err)
 	}
 
-	// Free the IP and save pool state
+	// Delete the node from storage first, then release its IP. In this order
+	// a failed delete leaves the IP still allocated (consistent) rather than
+	// recycling an IP that a surviving node record still owns.
+	if err := vnm.storage.DeleteNode(network.ID, nodeName); err != nil {
+		return err
+	}
+
+	// Free the IP and persist the updated pool state.
 	if ipPool, exists := vnm.ipPools[node.NetworkID]; exists {
 		if err := ipPool.ReleaseNodeIP(node.VirtualIP); err != nil {
 			// Log warning but continue - IP might already be released
@@ -386,7 +438,7 @@ func (vnm *VirtualNetworkManager) DeleteNode(networkName, nodeName string) error
 		}
 	}
 
-	return vnm.storage.DeleteNode(network.ID, nodeName)
+	return nil
 }
 
 // ========== WireGuard Configuration Generation ==========

@@ -229,6 +229,109 @@ func TestCreateNode_DefaultType(t *testing.T) {
 	}
 }
 
+// newReviewTestManager builds a storage-backed manager on a temp DB.
+func newReviewTestManager(t *testing.T) *VirtualNetworkManager {
+	t.Helper()
+	storage, err := NewStorageManager(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewStorageManager() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Errorf("storage.Close() error = %v", err)
+		}
+	})
+	vnm, err := NewVirtualNetworkManager(storage, util.NewDefaultIPValidator())
+	if err != nil {
+		t.Fatalf("NewVirtualNetworkManager() error = %v", err)
+	}
+	return vnm
+}
+
+func TestCreateServerNode_InvalidName(t *testing.T) {
+	vnm := newReviewTestManager(t)
+	if _, err := vnm.CreateVirtualNetwork("testnet", "10.0.0.0/24"); err != nil {
+		t.Fatalf("CreateVirtualNetwork() error = %v", err)
+	}
+
+	// Names become config file names; a path separator or other non-alphanumeric
+	// character must be rejected to prevent path traversal in `config generate`.
+	if _, err := vnm.CreateServer("testnet", "../evil", "1.2.3.4", 51820); err == nil {
+		t.Errorf("CreateServer() accepted a name with path-traversal characters")
+	}
+	if _, err := vnm.CreateNode("testnet", "bad name", "1.2.3.4", 51821, NodeTypePeer); err == nil {
+		t.Errorf("CreateNode() accepted a name containing a space")
+	}
+	if _, err := vnm.CreateNode("testnet", "1bad", "1.2.3.4", 51821, NodeTypePeer); err == nil {
+		t.Errorf("CreateNode() accepted a name not starting with a letter")
+	}
+
+	// A valid name still works.
+	if _, err := vnm.CreateServer("testnet", "gw1", "1.2.3.4", 51820); err != nil {
+		t.Errorf("CreateServer() rejected a valid name: %v", err)
+	}
+}
+
+func TestCreateServerNode_InvalidPort(t *testing.T) {
+	vnm := newReviewTestManager(t)
+	if _, err := vnm.CreateVirtualNetwork("testnet", "10.0.0.0/24"); err != nil {
+		t.Fatalf("CreateVirtualNetwork() error = %v", err)
+	}
+
+	for _, p := range []int{-1, 65536, 99999} {
+		if _, err := vnm.CreateServer("testnet", "gw", "1.2.3.4", p); err == nil {
+			t.Errorf("CreateServer() accepted out-of-range port %d", p)
+		}
+		if _, err := vnm.CreateNode("testnet", "n1", "1.2.3.4", p, NodeTypePeer); err == nil {
+			t.Errorf("CreateNode() accepted out-of-range port %d", p)
+		}
+	}
+
+	// A valid port (and port 0, which defaults to 51820) still works.
+	if _, err := vnm.CreateServer("testnet", "gw", "1.2.3.4", 0); err != nil {
+		t.Errorf("CreateServer() rejected the default port: %v", err)
+	}
+	if _, err := vnm.CreateNode("testnet", "n1", "1.2.3.4", 51821, NodeTypePeer); err != nil {
+		t.Errorf("CreateNode() rejected a valid port: %v", err)
+	}
+}
+
+func TestServerNodeNameCollision(t *testing.T) {
+	vnm := newReviewTestManager(t)
+	if _, err := vnm.CreateVirtualNetwork("neta", "10.0.0.0/24"); err != nil {
+		t.Fatalf("CreateVirtualNetwork(neta) error = %v", err)
+	}
+	if _, err := vnm.CreateServer("neta", "gw", "1.2.3.4", 51820); err != nil {
+		t.Fatalf("CreateServer() error = %v", err)
+	}
+	// A node may not reuse the server's name — configs are keyed by name.
+	if _, err := vnm.CreateNode("neta", "gw", "1.2.3.5", 51821, NodeTypePeer); err == nil {
+		t.Errorf("CreateNode() allowed a node to reuse the server name")
+	}
+
+	// And the reverse: a server may not reuse an existing node's name.
+	if _, err := vnm.CreateVirtualNetwork("netb", "10.1.0.0/24"); err != nil {
+		t.Fatalf("CreateVirtualNetwork(netb) error = %v", err)
+	}
+	if _, err := vnm.CreateNode("netb", "shared", "1.2.3.6", 51821, NodeTypePeer); err != nil {
+		t.Fatalf("CreateNode() error = %v", err)
+	}
+	if _, err := vnm.CreateServer("netb", "shared", "1.2.3.7", 51820); err == nil {
+		t.Errorf("CreateServer() allowed the server to reuse a node name")
+	}
+}
+
+func TestCreateNode_EmptyTypeRequiresAddress(t *testing.T) {
+	vnm := newReviewTestManager(t)
+	if _, err := vnm.CreateVirtualNetwork("testnet", "10.0.0.0/24"); err != nil {
+		t.Fatalf("CreateVirtualNetwork() error = %v", err)
+	}
+	// An empty type resolves to peer, and peer nodes require a public address.
+	if _, err := vnm.CreateNode("testnet", "n1", "", 51821, ""); err == nil {
+		t.Errorf("CreateNode() with empty type and no address should fail (defaults to peer)")
+	}
+}
+
 func TestDeleteNode_IPRecycling(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
