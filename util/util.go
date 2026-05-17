@@ -4,6 +4,7 @@ package util
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"regexp"
@@ -105,17 +106,16 @@ func NewIPPool(networkCIDR string) (*IPPool, error) {
 	// For IPv4 subnets with more than 2 IPs, first IP is network, last is broadcast
 	// For /31 and /32, all are usable
 	if totalIPsInt > 2 {
-		// Get first usable IP (network + 1)
-		firstIP := net.ParseIP(ipnet.IP.String())
-		firstIP = increment(firstIP)
-		firstUsable := firstIP.String()
-
-		// Last usable IP (broadcast - 1)
-		lastIP := net.ParseIP(ipnet.IP.String())
-		for i := 0; i < totalIPsInt-1; i++ {
-			lastIP = increment(lastIP)
+		// First usable IP is network + 1. lastUsable mirrors the previous
+		// computation (network + totalIPs - 1); both are O(1) arithmetic
+		// instead of walking every address in the subnet.
+		networkVal, ok := ipToUint32(ipnet.IP.String())
+		if !ok {
+			return nil, fmt.Errorf("invalid network address: %s", ipnet.IP.String())
 		}
-		lastUsable := lastIP.String()
+		firstUsable := uint32ToIP(networkVal + 1)
+		// #nosec G115 -- totalIPsInt is bounded by the subnet size, far below uint32 max.
+		lastUsable := uint32ToIP(networkVal + uint32(totalIPsInt) - 1)
 
 		return &IPPool{
 			networkCIDR: networkCIDR,
@@ -132,19 +132,25 @@ func NewIPPool(networkCIDR string) (*IPPool, error) {
 	return nil, fmt.Errorf("network must have at least 3 usable IPs")
 }
 
-// increment increments an IP address by 1
-func increment(ip net.IP) net.IP {
+// ipToUint32 converts a dotted-quad IPv4 string to its uint32 value.
+// The boolean result is false if the string is not a valid IPv4 address.
+func ipToUint32(s string) (uint32, bool) {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return 0, false
+	}
 	ip = ip.To4()
 	if ip == nil {
-		return nil
+		return 0, false
 	}
-	for i := len(ip) - 1; i >= 0; i-- {
-		ip[i]++
-		if ip[i] > 0 {
-			return ip
-		}
-	}
-	return ip
+	return binary.BigEndian.Uint32(ip), true
+}
+
+// uint32ToIP converts a uint32 value to its dotted-quad IPv4 string.
+func uint32ToIP(v uint32) string {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return net.IP(b[:]).String()
 }
 
 // GetServerIP returns the reserved server IP (first usable IP)
@@ -169,14 +175,15 @@ func (p *IPPool) AllocateNodeIP() (string, error) {
 			p.totalUsable, len(p.allocated))
 	}
 
-	// Calculate the IP at nextIndex
-	baseIP := net.ParseIP(p.firstUsable)
-	for i := 0; i < p.nextIndex; i++ {
-		baseIP = increment(baseIP)
+	// The IP at nextIndex is firstUsable + nextIndex — O(1) arithmetic.
+	firstVal, ok := ipToUint32(p.firstUsable)
+	if !ok {
+		return "", fmt.Errorf("invalid first usable IP: %s", p.firstUsable)
 	}
 	p.nextIndex++
 
-	ip := baseIP.String()
+	// #nosec G115 -- nextIndex is bounded by totalUsable, far below uint32 max.
+	ip := uint32ToIP(firstVal + uint32(p.nextIndex-1))
 	p.allocated[ip] = true
 	return ip, nil
 }
@@ -199,17 +206,25 @@ func (p *IPPool) MarkIPAllocated(ip string) error {
 func (p *IPPool) SyncNextIndex() {
 	maxIndex := 0
 
+	firstVal, ok := ipToUint32(p.firstUsable)
+	if !ok {
+		return
+	}
+
 	for allocatedIP := range p.allocated {
 		if allocatedIP == p.serverIP {
 			continue // Server IP is at index 0, skip it
 		}
 
-		// Calculate the index of this IP
-		currentIP := net.ParseIP(p.firstUsable)
-		index := 0
-		for currentIP.String() != allocatedIP && index < p.totalUsable {
-			currentIP = increment(currentIP)
-			index++
+		// The index of an allocated IP is its offset from the first usable
+		// IP — O(1) arithmetic instead of walking the pool.
+		allocVal, valid := ipToUint32(allocatedIP)
+		if !valid {
+			continue
+		}
+		index := int(allocVal - firstVal)
+		if index < 0 || index > p.totalUsable {
+			continue
 		}
 
 		if index > maxIndex {
