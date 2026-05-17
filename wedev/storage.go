@@ -1,9 +1,9 @@
 package wedev
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,15 +18,19 @@ const (
 	BucketNetworksByName = "networks_by_name"
 	// BucketServers is the BoltDB bucket for server data.
 	BucketServers = "servers"
-	// BucketServersByName is the index bucket for servers by name.
+	// BucketServersByName is the index bucket for servers by name (networkID:name -> server ID).
 	BucketServersByName = "servers_by_name"
+	// BucketServersByNetwork is the index bucket for the server of a network (networkID -> server ID).
+	BucketServersByNetwork = "servers_by_network"
 	// BucketNodes is the BoltDB bucket for node data.
 	BucketNodes = "nodes"
-	// BucketNodesByName is the index bucket for nodes by name.
+	// BucketNodesByName is the index bucket for nodes by name (networkID:name -> node ID).
 	BucketNodesByName = "nodes_by_name"
+	// BucketNodesByNetwork is the index bucket for nodes by network (networkID:nodeID -> node ID).
+	BucketNodesByNetwork = "nodes_by_network"
 	// BucketConfigs is the BoltDB bucket for config data.
 	BucketConfigs = "configs"
-	// BucketConfigsByVer is the index bucket for configs by version.
+	// BucketConfigsByVer is the index bucket for config versions (networkID:paddedVersion -> config ID).
 	BucketConfigsByVer = "configs_by_version"
 	// BucketIPPools is the BoltDB bucket for IP pool data.
 	BucketIPPools = "ip_pools"
@@ -105,8 +109,8 @@ func NewStorageManager(dbPath string) (*StorageManager, error) {
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		buckets := []string{
 			BucketNetworks, BucketNetworksByName,
-			BucketServers, BucketServersByName,
-			BucketNodes, BucketNodesByName,
+			BucketServers, BucketServersByName, BucketServersByNetwork,
+			BucketNodes, BucketNodesByName, BucketNodesByNetwork,
 			BucketConfigs, BucketConfigsByVer,
 			BucketIPPools,
 		}
@@ -129,6 +133,25 @@ func NewStorageManager(dbPath string) (*StorageManager, error) {
 // Close closes the database
 func (sm *StorageManager) Close() error {
 	return sm.db.Close()
+}
+
+// padVersion formats a version number into a fixed-width, lexically sortable
+// string for use in composite index keys.
+func padVersion(version int) string {
+	return fmt.Sprintf("%020d", version)
+}
+
+// forEachWithPrefix invokes fn for every key/value in bucket whose key starts
+// with prefix, in ascending key order. It uses a cursor seek, so cost is
+// proportional to the number of matching keys rather than the bucket size.
+func forEachWithPrefix(bucket *bbolt.Bucket, prefix []byte, fn func(k, v []byte) error) error {
+	c := bucket.Cursor()
+	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+		if err := fn(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ========== VirtualNetwork Operations ==========
@@ -254,80 +277,79 @@ func (sm *StorageManager) DeleteNetwork(name string) error {
 			return fmt.Errorf("network %q not found", name)
 		}
 		idStr := string(id)
+		prefix := []byte(idStr + ":")
 
-		// Delete server
+		// Delete the server (one per network) via the by-network index.
 		serversBucket := tx.Bucket([]byte(BucketServers))
 		serversByName := tx.Bucket([]byte(BucketServersByName))
-		if err := serversBucket.ForEach(func(k, v []byte) error {
-			server := &Server{}
-			if err := json.Unmarshal(v, server); err != nil {
+		serversByNetwork := tx.Bucket([]byte(BucketServersByNetwork))
+		if serverID := serversByNetwork.Get([]byte(idStr)); serverID != nil {
+			serverID = append([]byte(nil), serverID...)
+			if data := serversBucket.Get(serverID); data != nil {
+				server := &Server{}
+				if err := json.Unmarshal(data, server); err != nil {
+					return err
+				}
+				if err := serversByName.Delete([]byte(idStr + ":" + server.Name)); err != nil {
+					return err
+				}
+			}
+			if err := serversBucket.Delete(serverID); err != nil {
 				return err
 			}
-			if server.NetworkID == idStr {
-				if err := serversBucket.Delete(k); err != nil {
-					return err
-				}
-				// Delete from name index (networkID:name -> server.ID)
-				nameKey := idStr + ":" + server.Name
-				if err := serversByName.Delete([]byte(nameKey)); err != nil {
-					return err
-				}
+			if err := serversByNetwork.Delete([]byte(idStr)); err != nil {
+				return err
 			}
-			return nil
-		}); err != nil {
-			return err
 		}
 
-		// Delete nodes
+		// Delete all nodes via the by-network index prefix.
 		nodesBucket := tx.Bucket([]byte(BucketNodes))
 		nodesByName := tx.Bucket([]byte(BucketNodesByName))
-		if err := nodesBucket.ForEach(func(k, v []byte) error {
-			node := &Node{}
-			if err := json.Unmarshal(v, node); err != nil {
-				return err
-			}
-			if node.NetworkID == idStr {
-				if err := nodesBucket.Delete(k); err != nil {
-					return err
-				}
-				// Delete from name index (networkID:name -> node.ID)
-				nameKey := idStr + ":" + node.Name
-				if err := nodesByName.Delete([]byte(nameKey)); err != nil {
-					return err
-				}
-			}
+		nodesByNetwork := tx.Bucket([]byte(BucketNodesByNetwork))
+		var nodeIdxKeys, nodeIDs [][]byte
+		if err := forEachWithPrefix(nodesByNetwork, prefix, func(k, v []byte) error {
+			nodeIdxKeys = append(nodeIdxKeys, append([]byte(nil), k...))
+			nodeIDs = append(nodeIDs, append([]byte(nil), v...))
 			return nil
 		}); err != nil {
 			return err
 		}
-
-		// Delete configs
-		configsBucket := tx.Bucket([]byte(BucketConfigs))
-		configsByVer := tx.Bucket([]byte(BucketConfigsByVer))
-		if err := configsBucket.ForEach(func(k, v []byte) error {
-			config := &ConfigVersion{}
-			if err := json.Unmarshal(v, config); err != nil {
+		for i, nodeID := range nodeIDs {
+			if data := nodesBucket.Get(nodeID); data != nil {
+				node := &Node{}
+				if err := json.Unmarshal(data, node); err != nil {
+					return err
+				}
+				if err := nodesByName.Delete([]byte(idStr + ":" + node.Name)); err != nil {
+					return err
+				}
+			}
+			if err := nodesBucket.Delete(nodeID); err != nil {
 				return err
 			}
-			if config.NetworkID == idStr {
-				if err := configsBucket.Delete(k); err != nil {
-					return err
-				}
-				// Find and delete from version index
-				if err := configsByVer.ForEach(func(k2, v2 []byte) error {
-					if string(v2) == idStr {
-						if err := configsByVer.Delete(k2); err != nil {
-							return err
-						}
-					}
-					return nil
-				}); err != nil {
-					return err
-				}
+			if err := nodesByNetwork.Delete(nodeIdxKeys[i]); err != nil {
+				return err
 			}
+		}
+
+		// Delete all config versions via the by-network index prefix.
+		configsBucket := tx.Bucket([]byte(BucketConfigs))
+		configsByVer := tx.Bucket([]byte(BucketConfigsByVer))
+		var cfgIdxKeys, cfgIDs [][]byte
+		if err := forEachWithPrefix(configsByVer, prefix, func(k, v []byte) error {
+			cfgIdxKeys = append(cfgIdxKeys, append([]byte(nil), k...))
+			cfgIDs = append(cfgIDs, append([]byte(nil), v...))
 			return nil
 		}); err != nil {
 			return err
+		}
+		for i, cfgID := range cfgIDs {
+			if err := configsBucket.Delete(cfgID); err != nil {
+				return err
+			}
+			if err := configsByVer.Delete(cfgIdxKeys[i]); err != nil {
+				return err
+			}
 		}
 
 		// Delete IP pool
@@ -341,11 +363,7 @@ func (sm *StorageManager) DeleteNetwork(name string) error {
 		if err := networksBucket.Delete([]byte(idStr)); err != nil {
 			return err
 		}
-		if err := nameIdx.Delete([]byte(name)); err != nil {
-			return err
-		}
-
-		return nil
+		return nameIdx.Delete([]byte(name))
 	})
 }
 
@@ -362,22 +380,9 @@ func (sm *StorageManager) CreateServer(networkID, name, publicAddress string, po
 			return fmt.Errorf("network %q not found", networkID)
 		}
 
-		// Check if server already exists for this network
-		serversBucket := tx.Bucket([]byte(BucketServers))
-		found := false
-		if err := serversBucket.ForEach(func(_, v []byte) error {
-			s := &Server{}
-			if err := json.Unmarshal(v, s); err != nil {
-				return err
-			}
-			if s.NetworkID == networkID {
-				found = true
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		if found {
+		// One server per network — O(1) check via the by-network index.
+		serversByNetwork := tx.Bucket([]byte(BucketServersByNetwork))
+		if serversByNetwork.Get([]byte(networkID)) != nil {
 			return fmt.Errorf("server already exists for network %q", networkID)
 		}
 
@@ -406,13 +411,17 @@ func (sm *StorageManager) CreateServer(networkID, name, publicAddress string, po
 		if err != nil {
 			return fmt.Errorf("failed to marshal server: %w", err)
 		}
+		serversBucket := tx.Bucket([]byte(BucketServers))
 		if err := serversBucket.Put([]byte(server.ID), data); err != nil {
 			return fmt.Errorf("failed to save server: %w", err)
 		}
 
-		// Save to secondary bucket (name -> id)
+		// Save to index buckets (name -> id, networkID -> id)
 		if err := serversByName.Put([]byte(nameKey), []byte(server.ID)); err != nil {
 			return fmt.Errorf("failed to save name index: %w", err)
+		}
+		if err := serversByNetwork.Put([]byte(networkID), []byte(server.ID)); err != nil {
+			return fmt.Errorf("failed to save network index: %w", err)
 		}
 
 		return nil
@@ -455,29 +464,21 @@ func (sm *StorageManager) GetServerByNetworkID(networkID string) (*Server, error
 	var server *Server
 
 	err := sm.db.View(func(tx *bbolt.Tx) error {
-		serversBucket := tx.Bucket([]byte(BucketServers))
-		found := false
-		var findErr error
-		if err := serversBucket.ForEach(func(_, v []byte) error {
-			s := &Server{}
-			if err := json.Unmarshal(v, s); err != nil {
-				findErr = err
-				return err
-			}
-			if s.NetworkID == networkID {
-				server = s
-				found = true
-				return nil
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		if findErr != nil {
-			return findErr
-		}
-		if !found {
+		serversByNetwork := tx.Bucket([]byte(BucketServersByNetwork))
+		id := serversByNetwork.Get([]byte(networkID))
+		if id == nil {
 			return fmt.Errorf("no server found for network %q", networkID)
+		}
+
+		serversBucket := tx.Bucket([]byte(BucketServers))
+		data := serversBucket.Get(id)
+		if data == nil {
+			return fmt.Errorf("no server found for network %q", networkID)
+		}
+
+		server = &Server{}
+		if err := json.Unmarshal(data, server); err != nil {
+			return fmt.Errorf("failed to unmarshal server: %w", err)
 		}
 		return nil
 	})
@@ -514,37 +515,29 @@ func (sm *StorageManager) UpdateServer(id, publicAddress string, port int) error
 // DeleteServer deletes a server
 func (sm *StorageManager) DeleteServer(networkID string) error {
 	return sm.db.Update(func(tx *bbolt.Tx) error {
+		serversByNetwork := tx.Bucket([]byte(BucketServersByNetwork))
+		id := serversByNetwork.Get([]byte(networkID))
+		if id == nil {
+			return fmt.Errorf("server not found for network")
+		}
+		id = append([]byte(nil), id...)
+
 		serversBucket := tx.Bucket([]byte(BucketServers))
 		serversByName := tx.Bucket([]byte(BucketServersByName))
 
-		var serverID string
-		var serverName string
-		if err := serversBucket.ForEach(func(k, v []byte) error {
+		if data := serversBucket.Get(id); data != nil {
 			server := &Server{}
-			if err := json.Unmarshal(v, server); err != nil {
+			if err := json.Unmarshal(data, server); err != nil {
 				return err
 			}
-			if server.NetworkID == networkID {
-				serverID = string(k)
-				serverName = server.Name
-				return nil
+			if err := serversByName.Delete([]byte(networkID + ":" + server.Name)); err != nil {
+				return err
 			}
-			return nil
-		}); err != nil {
+		}
+		if err := serversBucket.Delete(id); err != nil {
 			return err
 		}
-
-		if serverID == "" {
-			return fmt.Errorf("server not found for network")
-		}
-
-		if err := serversBucket.Delete([]byte(serverID)); err != nil {
-			return err
-		}
-		if err := serversByName.Delete([]byte(serverName)); err != nil {
-			return err
-		}
-		return nil
+		return serversByNetwork.Delete([]byte(networkID))
 	})
 }
 
@@ -592,9 +585,13 @@ func (sm *StorageManager) CreateNode(networkID, name, publicAddress string, port
 			return fmt.Errorf("failed to save node: %w", err)
 		}
 
-		// Save to secondary bucket (name -> id)
+		// Save to index buckets (name -> id, networkID:nodeID -> id)
 		if err := nodesByName.Put([]byte(nameKey), []byte(node.ID)); err != nil {
 			return fmt.Errorf("failed to save name index: %w", err)
+		}
+		nodesByNetwork := tx.Bucket([]byte(BucketNodesByNetwork))
+		if err := nodesByNetwork.Put([]byte(networkID+":"+node.ID), []byte(node.ID)); err != nil {
+			return fmt.Errorf("failed to save network index: %w", err)
 		}
 
 		return nil
@@ -637,15 +634,18 @@ func (sm *StorageManager) ListNodesByNetworkID(networkID string) ([]*Node, error
 	var nodes []*Node
 
 	err := sm.db.View(func(tx *bbolt.Tx) error {
+		nodesByNetwork := tx.Bucket([]byte(BucketNodesByNetwork))
 		nodesBucket := tx.Bucket([]byte(BucketNodes))
-		return nodesBucket.ForEach(func(k, v []byte) error {
+		return forEachWithPrefix(nodesByNetwork, []byte(networkID+":"), func(_, v []byte) error {
+			data := nodesBucket.Get(v)
+			if data == nil {
+				return nil
+			}
 			node := &Node{}
-			if err := json.Unmarshal(v, node); err != nil {
+			if err := json.Unmarshal(data, node); err != nil {
 				return err
 			}
-			if node.NetworkID == networkID {
-				nodes = append(nodes, node)
-			}
+			nodes = append(nodes, node)
 			return nil
 		})
 	})
@@ -689,15 +689,17 @@ func (sm *StorageManager) DeleteNode(networkID, name string) error {
 		if id == nil {
 			return fmt.Errorf("node %q not found", name)
 		}
+		idStr := string(id)
 
 		nodesBucket := tx.Bucket([]byte(BucketNodes))
-		if err := nodesBucket.Delete(id); err != nil {
+		if err := nodesBucket.Delete([]byte(idStr)); err != nil {
 			return err
 		}
 		if err := nodesByName.Delete([]byte(nameKey)); err != nil {
 			return err
 		}
-		return nil
+		nodesByNetwork := tx.Bucket([]byte(BucketNodesByNetwork))
+		return nodesByNetwork.Delete([]byte(networkID + ":" + idStr))
 	})
 }
 
@@ -708,19 +710,25 @@ func (sm *StorageManager) SaveConfigVersion(networkID, contentHash string, confi
 	var config *ConfigVersion
 
 	err := sm.db.Update(func(tx *bbolt.Tx) error {
-		// Get next version number by finding the maximum version for this network
 		configsBucket := tx.Bucket([]byte(BucketConfigs))
+		configsByVer := tx.Bucket([]byte(BucketConfigsByVer))
+
+		// Next version = highest existing version for this network + 1.
+		// The version index is keyed networkID:paddedVersion, so the last
+		// matching key holds the maximum version — only this network's
+		// (tiny) index entries are scanned.
 		nextVer := 1
-		if err := configsBucket.ForEach(func(_, v []byte) error {
-			c := &ConfigVersion{}
-			if err := json.Unmarshal(v, c); err == nil {
-				if c.NetworkID == networkID && c.Version >= nextVer {
-					nextVer = c.Version + 1
-				}
+		prefix := []byte(networkID + ":")
+		c := configsByVer.Cursor()
+		var lastKey []byte
+		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+			lastKey = k
+		}
+		if lastKey != nil {
+			var maxVer int
+			if _, err := fmt.Sscanf(string(lastKey[len(prefix):]), "%d", &maxVer); err == nil {
+				nextVer = maxVer + 1
 			}
-			return nil
-		}); err != nil {
-			return err
 		}
 
 		config = &ConfigVersion{
@@ -741,6 +749,11 @@ func (sm *StorageManager) SaveConfigVersion(networkID, contentHash string, confi
 			return fmt.Errorf("failed to save config: %w", err)
 		}
 
+		// Save to version index (networkID:paddedVersion -> id)
+		if err := configsByVer.Put([]byte(networkID+":"+padVersion(config.Version)), []byte(config.ID)); err != nil {
+			return fmt.Errorf("failed to save version index: %w", err)
+		}
+
 		return nil
 	})
 
@@ -752,25 +765,27 @@ func (sm *StorageManager) GetLatestConfigVersion(networkID string) (*ConfigVersi
 	var latestConfig *ConfigVersion
 
 	err := sm.db.View(func(tx *bbolt.Tx) error {
+		configsByVer := tx.Bucket([]byte(BucketConfigsByVer))
 		configsBucket := tx.Bucket([]byte(BucketConfigs))
-		if err := configsBucket.ForEach(func(_, v []byte) error {
-			config := &ConfigVersion{}
-			if err := json.Unmarshal(v, config); err != nil {
-				return err
-			}
-			if config.NetworkID == networkID {
-				if latestConfig == nil || config.Version > latestConfig.Version {
-					latestConfig = config
-				}
-			}
-			return nil
-		}); err != nil {
-			return err
+
+		// The version index is sorted, so the last key for this network's
+		// prefix points at the highest version.
+		prefix := []byte(networkID + ":")
+		c := configsByVer.Cursor()
+		var lastID []byte
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			lastID = v
 		}
-		if latestConfig == nil {
+		if lastID == nil {
 			return fmt.Errorf("no config version found for network %q", networkID)
 		}
-		return nil
+
+		data := configsBucket.Get(lastID)
+		if data == nil {
+			return fmt.Errorf("no config version found for network %q", networkID)
+		}
+		latestConfig = &ConfigVersion{}
+		return json.Unmarshal(data, latestConfig)
 	})
 
 	return latestConfig, err
@@ -781,61 +796,44 @@ func (sm *StorageManager) GetConfigVersion(networkID string, version int) (*Conf
 	var config *ConfigVersion
 
 	err := sm.db.View(func(tx *bbolt.Tx) error {
-		configsBucket := tx.Bucket([]byte(BucketConfigs))
-		found := false
-		if err := configsBucket.ForEach(func(_, v []byte) error {
-			c := &ConfigVersion{}
-			if err := json.Unmarshal(v, c); err != nil {
-				return err
-			}
-			if c.NetworkID == networkID && c.Version == version {
-				config = c
-				found = true
-				return nil
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		if !found {
+		configsByVer := tx.Bucket([]byte(BucketConfigsByVer))
+		id := configsByVer.Get([]byte(networkID + ":" + padVersion(version)))
+		if id == nil {
 			return fmt.Errorf("config version %d not found for network %q", version, networkID)
 		}
-		return nil
+
+		data := tx.Bucket([]byte(BucketConfigs)).Get(id)
+		if data == nil {
+			return fmt.Errorf("config version %d not found for network %q", version, networkID)
+		}
+		config = &ConfigVersion{}
+		return json.Unmarshal(data, config)
 	})
 
 	return config, err
 }
 
-// ListConfigVersions lists all versions for a network
+// ListConfigVersions lists all versions for a network, ordered by version.
 func (sm *StorageManager) ListConfigVersions(networkID string) ([]*ConfigVersion, error) {
 	var versions []*ConfigVersion
 
 	err := sm.db.View(func(tx *bbolt.Tx) error {
+		configsByVer := tx.Bucket([]byte(BucketConfigsByVer))
 		configsBucket := tx.Bucket([]byte(BucketConfigs))
-		return configsBucket.ForEach(func(_, v []byte) error {
+
+		// Index keys are version-ordered, so results come out sorted.
+		return forEachWithPrefix(configsByVer, []byte(networkID+":"), func(_, v []byte) error {
+			data := configsBucket.Get(v)
+			if data == nil {
+				return nil
+			}
 			config := &ConfigVersion{}
-			if err := json.Unmarshal(v, config); err != nil {
+			if err := json.Unmarshal(data, config); err != nil {
 				return err
 			}
-			if config.NetworkID == networkID {
-				versions = append(versions, config)
-			}
+			versions = append(versions, config)
 			return nil
 		})
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	// Sort by version in ascending order
-	slices.SortFunc(versions, func(a, b *ConfigVersion) int {
-		if a.Version < b.Version {
-			return -1
-		} else if a.Version > b.Version {
-			return 1
-		}
-		return 0
 	})
 
 	return versions, err

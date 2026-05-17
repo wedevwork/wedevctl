@@ -20,7 +20,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.9'
+          go-version: '1.25.10'
 
       - name: Verify dependencies
         run: go mod verify
@@ -38,11 +38,14 @@ jobs:
 
       - name: Install golangci-lint
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.11.4
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.11.4/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.11.4
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
       - name: Run golangci-lint
-        run: golangci-lint run --timeout=5m --config=.golangci.yml || golangci-lint run --timeout=5m
+        # golangci-lint auto-detects .golangci.yml in the repo root; this run
+        # also executes gosec (enabled in .golangci.yml) and is the blocking
+        # lint + security gate. A real finding here fails the job.
+        run: golangci-lint run --timeout=5m
 
   test:
     name: Test Suite
@@ -54,7 +57,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.9'
+          go-version: '1.25.10'
 
       - name: Download dependencies
         run: go mod download
@@ -64,50 +67,37 @@ jobs:
 
       - name: Check test coverage
         run: |
-          # Overall coverage
+          # Coverage gate: ≥80% overall and ≥80% for every package
+          # (matches CLAUDE.md / .claude/workflow.md Rule 2).
+          THRESHOLD=80.0
+          fail=0
+
           overall=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
           echo "📊 Overall coverage: ${overall}%"
-          
-          # Check overall coverage (relaxed for CLI code)
-          if (( $(echo "$overall < 53.0" | bc -l) )); then
-            echo "❌ Overall coverage ${overall}% is below required 53%"
+          if (( $(echo "$overall < $THRESHOLD" | bc -l) )); then
+            echo "❌ Overall coverage ${overall}% is below required ${THRESHOLD}%"
+            fail=1
+          fi
+
+          for pkg in cmd wedev util; do
+            go test -coverprofile=${pkg}_coverage.out ./${pkg}/... > /dev/null 2>&1
+            cov=$(go tool cover -func=${pkg}_coverage.out 2>/dev/null | grep total | awk '{print $3}' | sed 's/%//')
+            echo "📊 ${pkg}/ package coverage: ${cov:-(none)}%"
+            if [ -z "$cov" ]; then
+              echo "❌ Failed to get ${pkg}/ coverage"
+              fail=1
+              continue
+            fi
+            if (( $(echo "$cov < $THRESHOLD" | bc -l) )); then
+              echo "❌ ${pkg}/ coverage ${cov}% is below required ${THRESHOLD}%"
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
             exit 1
           fi
-          
-          # Check wedev package specifically (business logic should be well-tested)
-          go test -coverprofile=wedev_coverage.out ./wedev/... > /dev/null 2>&1
-          wedev_cov=$(go tool cover -func=wedev_coverage.out 2>/dev/null | grep total | awk '{print $3}' | sed 's/%//' || echo "0")
-          echo "📊 wedev/ package coverage: ${wedev_cov}%"
-          
-          if [ -z "$wedev_cov" ] || [ "$wedev_cov" = "0" ]; then
-            echo "❌ Failed to get wedev/ coverage"
-            exit 1
-          fi
-          
-          if (( $(echo "$wedev_cov < 65.0" | bc -l) )); then
-            echo "❌ wedev/ coverage ${wedev_cov}% is below required 65%"
-            exit 1
-          fi
-          
-          # Check util package specifically (utility functions should be well-tested)
-          go test -coverprofile=util_coverage.out ./util/... > /dev/null 2>&1
-          util_cov=$(go tool cover -func=util_coverage.out 2>/dev/null | grep total | awk '{print $3}' | sed 's/%//' || echo "0")
-          echo "📊 util/ package coverage: ${util_cov}%"
-          
-          if [ -z "$util_cov" ] || [ "$util_cov" = "0" ]; then
-            echo "❌ Failed to get util/ coverage"
-            exit 1
-          fi
-          
-          if (( $(echo "$util_cov < 65.0" | bc -l) )); then
-            echo "❌ util/ coverage ${util_cov}% is below required 65%"
-            exit 1
-          fi
-          
-          echo "✅ All coverage requirements met:"
-          echo "   - Overall: ${overall}% (≥53% required)"
-          echo "   - wedev/: ${wedev_cov}% (≥65% required)"
-          echo "   - util/: ${util_cov}% (≥65% required)"
+          echo "✅ All coverage requirements met (≥${THRESHOLD}% overall and per package)"
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -127,7 +117,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.9'
+          go-version: '1.25.10'
 
       - name: Build binary
         run: go build -v -o wedevctl main.go
@@ -145,8 +135,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.9'
+          go-version: '1.25.10'
 
+      # gosec: static analysis of our own source code. Runs with -no-fail
+      # here (reporting only); golangci-lint also runs gosec and is the
+      # blocking code-security gate.
       - name: Run Gosec Security Scanner
         uses: securego/gosec@master
         with:
@@ -157,6 +150,14 @@ jobs:
         with:
           sarif_file: results.sarif
         continue-on-error: true
+
+      # govulncheck: checks dependencies AND the Go stdlib/toolchain for
+      # known CVEs (with reachability analysis). This step IS allowed to
+      # fail the build — a known CVE in a dependency is actionable.
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
   # This job ensures all checks pass before merge
   all-checks-passed:
