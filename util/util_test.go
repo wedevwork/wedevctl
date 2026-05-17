@@ -362,6 +362,31 @@ func TestValidateEndpoint(t *testing.T) {
 	}
 }
 
+func TestValidatePort(t *testing.T) {
+	tests := []struct {
+		name    string
+		port    int
+		wantErr bool
+	}{
+		{"lowest valid", 1, false},
+		{"highest valid", 65535, false},
+		{"typical", 51820, false},
+		{"zero", 0, true},
+		{"negative", -1, true},
+		{"above range", 65536, true},
+		{"far above range", 99999, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePort(tt.port)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidatePort(%d) error = %v, wantErr %v", tt.port, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestFormatEndpoint(t *testing.T) {
 	tests := []struct {
 		name     string
