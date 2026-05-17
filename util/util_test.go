@@ -46,6 +46,9 @@ func TestDefaultIPValidator_IsValidCIDR(t *testing.T) {
 		{"invalid CIDR no mask", "10.0.0.0", true},
 		{"invalid CIDR bad format", "10.0.0/24", true},
 		{"invalid CIDR out of range", "10.0.0.0/33", true},
+		{"too large /15", "10.0.0.0/15", true},
+		{"too large /8", "10.0.0.0/8", true},
+		{"too large /0", "0.0.0.0/0", true},
 	}
 
 	validator := NewDefaultIPValidator()

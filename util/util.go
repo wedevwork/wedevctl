@@ -44,6 +44,12 @@ func (v *DefaultIPValidator) IsValidCIDR(cidr string) error {
 	if ipnet == nil {
 		return fmt.Errorf("invalid CIDR: network is nil")
 	}
+	// Reject IPv4 networks larger than /16. Anything bigger is beyond a
+	// realistic WireGuard deployment and guards against pathological
+	// address-space sizes during IP-pool bookkeeping.
+	if ones, bits := ipnet.Mask.Size(); bits == 32 && ones < 16 {
+		return fmt.Errorf("network is too large (/%d); use a /16 or longer prefix", ones)
+	}
 	return nil
 }
 

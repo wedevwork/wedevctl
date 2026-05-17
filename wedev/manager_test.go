@@ -79,6 +79,23 @@ func TestCreateVirtualNetwork_InvalidName(t *testing.T) {
 	}
 }
 
+func TestCreateVirtualNetwork_ReservedName(t *testing.T) {
+	vnm := newReviewTestManager(t)
+
+	// These names collide with `vn` CLI subcommands; a network with one of
+	// them would be unmanageable, so creation must reject them.
+	for _, name := range []string{"add", "list", "delete", "help", "completion"} {
+		if _, err := vnm.CreateVirtualNetwork(name, "10.0.0.0/24"); err == nil {
+			t.Errorf("CreateVirtualNetwork(%q) accepted a reserved name", name)
+		}
+	}
+
+	// A non-reserved name still works.
+	if _, err := vnm.CreateVirtualNetwork("prod", "10.0.0.0/24"); err != nil {
+		t.Errorf("CreateVirtualNetwork(\"prod\") rejected a valid name: %v", err)
+	}
+}
+
 func TestCreateServer_Success(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
