@@ -1,6 +1,8 @@
 package util
 
 import (
+	"crypto/ecdh"
+	"encoding/base64"
 	"testing"
 )
 
@@ -297,6 +299,40 @@ func TestGenerateWireGuardKeys_Uniqueness(t *testing.T) {
 	}
 	if keys1.PublicKey == keys2.PublicKey {
 		t.Errorf("Generated public keys should be unique")
+	}
+}
+
+// TestGenerateWireGuardKeys_PublicDerivedFromPrivate guards the core property
+// of a real WireGuard key pair: the public key must be the X25519 point of the
+// private key, not an independent random value.
+func TestGenerateWireGuardKeys_PublicDerivedFromPrivate(t *testing.T) {
+	keys, err := GenerateWireGuardKeys()
+	if err != nil {
+		t.Fatalf("GenerateWireGuardKeys() error = %v", err)
+	}
+
+	privBytes, err := base64.StdEncoding.DecodeString(keys.PrivateKey)
+	if err != nil {
+		t.Fatalf("private key is not valid base64: %v", err)
+	}
+	if len(privBytes) != 32 {
+		t.Fatalf("private key length = %d bytes, want 32", len(privBytes))
+	}
+
+	// Clamping per RFC 7748 §5 must be applied (matches `wg genkey`).
+	if privBytes[0]&7 != 0 || privBytes[31]&128 != 0 || privBytes[31]&64 != 64 {
+		t.Errorf("private key is not clamped per RFC 7748")
+	}
+
+	// Re-derive the public key from the private key; it must match.
+	priv, err := ecdh.X25519().NewPrivateKey(privBytes)
+	if err != nil {
+		t.Fatalf("private key is not a valid X25519 key: %v", err)
+	}
+	wantPub := base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes())
+	if keys.PublicKey != wantPub {
+		t.Errorf("public key is not derived from private key:\n got  %s\n want %s",
+			keys.PublicKey, wantPub)
 	}
 }
 
