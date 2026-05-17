@@ -96,11 +96,21 @@ func (vnm *VirtualNetworkManager) ensureIPPool(networkID, networkCIDR string) er
 	return nil
 }
 
+// reservedNetworkNames are names that collide with `vn` CLI subcommands (and
+// cobra's built-in commands). A network with one of these names would be
+// unreachable via `wedevctl vn <name> ...`, so they are rejected at creation.
+var reservedNetworkNames = map[string]bool{
+	"add": true, "list": true, "delete": true, "help": true, "completion": true,
+}
+
 // CreateVirtualNetwork creates a new virtual network.
 func (vnm *VirtualNetworkManager) CreateVirtualNetwork(name, cidr string) (*VirtualNetwork, error) {
 	// Validate input
 	if err := vnm.validator.IsValidNetworkName(name); err != nil {
 		return nil, err
+	}
+	if reservedNetworkNames[name] {
+		return nil, fmt.Errorf("network name %q is reserved (it collides with a CLI command)", name)
 	}
 	if err := vnm.validator.IsValidCIDR(cidr); err != nil {
 		return nil, err
