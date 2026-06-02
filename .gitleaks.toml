@@ -1,0 +1,21 @@
+# gitleaks configuration for wedevctl.
+#
+# Extends the upstream default ruleset and adds a narrowly-scoped allowlist for
+# a known false positive. The default rules are kept so real secrets still fail
+# the CI secret-scan gate.
+[extend]
+useDefault = true
+
+# Allowlist a single false positive. The unit test in util/util_test.go
+# generates ephemeral X25519 key pairs at runtime and compares struct fields
+# with a Go accessor expression of the form keysN.PrivateKey. The default
+# generic-api-key rule misreads that dotted identifier as a high-entropy
+# secret. We match the accessor shape itself (an identifier ending in a numeric
+# index, then ".PrivateKey"), which a real random credential will never take,
+# so this cannot mask an actual leak.
+[allowlist]
+description = "Go struct field accessor 'keysN.PrivateKey' is not a secret"
+regexTarget = "match"
+regexes = [
+  '''keys\d+\.PrivateKey''',
+]

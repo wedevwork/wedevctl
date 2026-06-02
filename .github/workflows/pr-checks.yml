@@ -131,11 +131,22 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks can scan all commits
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.10'
+
+      # gitleaks: secret/credential scanner. Blocking — a committed private key,
+      # token, or .env must fail the build (closes the gap that gosec/govulncheck
+      # do not cover). We run the open-source binary directly instead of
+      # gitleaks-action, which requires a paid license for organizations.
+      - name: Run gitleaks secret scan
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@latest
+          gitleaks detect --source . --redact --no-banner
 
       # gosec: static analysis of our own source code. Runs with -no-fail
       # here (reporting only); golangci-lint also runs gosec and is the
