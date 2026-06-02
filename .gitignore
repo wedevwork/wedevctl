@@ -22,6 +22,9 @@ profile.cov
 target/
 build/
 wedevctl
+
+# Scratch output dir — may contain generated WireGuard configs with live private keys
+tmp/
 design/
 design
 .github/copilot-instructions.md
