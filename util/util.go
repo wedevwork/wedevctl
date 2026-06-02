@@ -58,6 +58,14 @@ func (v *DefaultIPValidator) IsValidPublicAddress(addr string) error {
 	if addr == "" {
 		return fmt.Errorf("public address cannot be empty")
 	}
+	// Reject control characters (including newlines, carriage returns, and
+	// tabs) before any other check. The address is written verbatim into the
+	// generated WireGuard config's "Endpoint" line; an embedded newline would
+	// let a caller inject arbitrary config directives (e.g. PostUp, which
+	// wg-quick executes as a shell command).
+	if i := strings.IndexFunc(addr, func(r rune) bool { return r < 0x20 || r == 0x7f }); i >= 0 {
+		return fmt.Errorf("public address cannot contain control characters")
+	}
 	// Try to parse as IP first
 	if ip := net.ParseIP(addr); ip != nil {
 		return nil
