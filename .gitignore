@@ -23,6 +23,9 @@ target/
 build/
 wedevctl
 
+# Generated WireGuard config files — contain live private keys; never commit
+*.conf
+
 # Scratch output dir — may contain generated WireGuard configs with live private keys
 tmp/
 design/

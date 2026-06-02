@@ -76,6 +76,10 @@ func TestDefaultIPValidator_IsValidPublicAddress(t *testing.T) {
 		{"IP with space", "192.168.1.1 ", true},
 		{"domain with space", "example .com", true},
 		{"single word no dot", "nodomain", true},
+		{"newline injection", "1.1.1.1\nPostUp=evil", true},
+		{"carriage return injection", "example.com\rPostUp=evil", true},
+		{"tab injection", "example.com\tDNS=8.8.8.8", true},
+		{"del control char", "example.com\x7f", true},
 	}
 
 	validator := NewDefaultIPValidator()
