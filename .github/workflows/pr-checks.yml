@@ -20,7 +20,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.10'
+          go-version: '1.25.11'
 
       - name: Verify dependencies
         run: go mod verify
@@ -57,7 +57,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.10'
+          go-version: '1.25.11'
 
       - name: Download dependencies
         run: go mod download
@@ -117,7 +117,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.10'
+          go-version: '1.25.11'
 
       - name: Build binary
         run: go build -v -o wedevctl main.go
@@ -137,7 +137,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.10'
+          go-version: '1.25.11'
 
       # gitleaks: secret/credential scanner. Blocking — a committed private key,
       # token, or .env must fail the build (closes the gap that gosec/govulncheck
