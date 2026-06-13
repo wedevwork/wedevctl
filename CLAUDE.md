@@ -82,7 +82,7 @@ wedevctl/
 ## Module & Toolchain
 
 - **Module path**: `github.com/wedevctl`
-- **Go version**: `go 1.25.0` / toolchain `go1.25.10` (see `go.mod`)
+- **Go version**: `go 1.25.0` / toolchain `go1.25.11` (see `go.mod`)
 - Internal imports use the prefix `github.com/wedevctl/` (e.g. `github.com/wedevctl/cmd`, `github.com/wedevctl/wedev`, `github.com/wedevctl/util`)
 
 ## Dependencies
